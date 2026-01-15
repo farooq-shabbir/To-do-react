@@ -83,17 +83,17 @@ jobs:
             
             echo "Image pushed successfully"
       - run:
-          name: Save commit SHA for rollback
-          command: |
-            echo "${CIRCLE_SHA1}" > /tmp/last-successful-commit.txt
-      - store_artifacts:
-          path: /tmp/last-successful-commit.txt
-          destinTag as last-known-good for rollback
+          name: Tag as last-known-good for rollback
           command: |
             # After successful push, save this version for rollback
             docker tag farooqshabbir98/to-do-react:v1 farooqshabbir98/to-do-react:last-known-good
             docker push farooqshabbir98/to-do-react:last-known-good
             echo "Backup tag created: last-known-good"
+
+  rollback-deployment:
+    docker:
+      - image: cimg/base:stable
+    steps:
       - checkout
       - setup_remote_docker:
           docker_layer_caching: true
