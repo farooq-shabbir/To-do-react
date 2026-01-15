@@ -29,18 +29,98 @@ jobs:
           # version: 20.10.14
           docker_layer_caching: true
       - run:
-          name: Build Docker image
+          name: Build Docker image with retry
           command: |
-            docker build -t to-do-react-image:v1 .
+            retry_count=0
+            max_retries=3
+            until [ $retry_count -ge $max_retries ]
+            do
+              docker build -t to-do-react-image:v1 . && break
+              retry_count=$((retry_count+1))
+              echo "Build attempt $retry_count failed. Retrying in 10 seconds..."
+              sleep 10
+            done
+            if [ $retry_count -ge $max_retries ]; then
+              echo "Build failed after $max_retries attempts"
+              exit 1
+            fi
             docker tag to-do-react-image:v1 farooqshabbir98/to-do-react:v1
+            docker tag to-do-react-image:v1 farooqshabbir98/to-do-react:${CIRCLE_SHA1}
+            docker tag to-do-react-image:v1 farooqshabbir98/to-do-react:last-known-good
+      - run:
+          name: Login to Docker Hub with retry
+          command: |
+            retry_count=0
+            max_retries=5
+            until [ $retry_count -ge $max_retries ]
+            do
+              echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin && break
+              retry_count=$((retry_count+1))
+              echo "Login attempt $retry_count failed. Retrying in 5 seconds..."
+              sleep 5
+            done
+            if [ $retry_count -ge $max_retries ]; then
+              echo "Docker Hub login failed after $max_retries attempts"
+              exit 1
+            fi
+      - run:
+          name: Push to Docker Hub with retry
+          command: |
+            retry_count=0
+            max_retries=5
+            
+            # Function to push with retry
+            push_with_retry() {
+              local tag=$1
+              local attempts=0
+              until [ $attempts -ge $max_retries ]
+              do
+                docker push farooqshabbir98/to-do-react:$tag && return 0
+                attempts=$((attempts+1))
+                echo "Push attempt $attempts for tag $tag failed. Retrying in 10 seconds..."
+                sleep 10
+              done
+              return 1
+            }
+            
+            # Push all tags with retry
+            push_with_retry "v1" || exit 1
+            push_with_retry "${CIRCLE_SHA1}" || exit 1
+            push_with_retry "last-known-good" || exit 1
+            
+            echo "All tags pushed successfully"
+      - run:
+          name: Save commit SHA for rollback
+          command: |
+            echo "${CIRCLE_SHA1}" > /tmp/last-successful-commit.txt
+      - store_artifacts:
+          path: /tmp/last-successful-commit.txt
+          destination: last-successful-commit
+
+  rollback-deployment:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
       - run:
           name: Login to Docker Hub
           command: |
             echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
       - run:
-          name: Push to Docker Hub
+          name: Rollback to last known good version
           command: |
+            # Pull the last known good image
+            docker pull farooqshabbir98/to-do-react:last-known-good
+            
+            # Re-tag it as v1 (current version)
+            docker tag farooqshabbir98/to-do-react:last-known-good farooqshabbir98/to-do-react:v1
+            
+            # Push the rollback version
             docker push farooqshabbir98/to-do-react:v1
+            
+            echo "Rollback completed successfully to last-known-good version"
 
 workflows:
   build-deploy:
@@ -52,3 +132,11 @@ workflows:
           filters:
             branches:
               only: main
+  
+  rollback:
+    jobs:
+      - hold-for-approval:
+          type: approval
+      - rollback-deployment:
+          requires:
+            - hold-for-approval
