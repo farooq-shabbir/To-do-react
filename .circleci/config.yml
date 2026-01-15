@@ -1,0 +1,58 @@
+version: 2.1
+
+orbs:
+  node: circleci/node@5.1.0
+
+jobs:
+  build-and-test:
+    docker:
+      - image: cimg/node:18.19
+    steps:
+      - checkout
+      - node/install-packages:
+          pkg-manager: npm
+      - run:
+          name: Build application
+          command: npm run build
+      - persist_to_workspace:
+          root: .
+          paths:
+            - dist
+
+  deploy:
+    docker:
+      - image: cimg/node:18.19
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: Deploy to hosting
+          command: |
+            # Add your deployment commands here
+            # Examples below:
+            
+            # For Netlify:
+            # npm install -g netlify-cli
+            # netlify deploy --prod --dir=dist --auth=$NETLIFY_AUTH_TOKEN --site=$NETLIFY_SITE_ID
+            
+            # For Vercel:
+            # npm install -g vercel
+            # vercel --prod --token=$VERCEL_TOKEN
+            
+            # For GitHub Pages:
+            # npm install -g gh-pages
+            # gh-pages -d dist
+            
+            echo "Add your deployment command here"
+
+workflows:
+  build-deploy:
+    jobs:
+      - build-and-test
+      - deploy:
+          requires:
+            - build-and-test
+          filters:
+            branches:
+              only: main
