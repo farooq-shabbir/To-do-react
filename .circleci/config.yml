@@ -45,8 +45,6 @@ jobs:
               exit 1
             fi
             docker tag to-do-react-image:v1 farooqshabbir98/to-do-react:v1
-            docker tag to-do-react-image:v1 farooqshabbir98/to-do-react:${CIRCLE_SHA1}
-            docker tag to-do-react-image:v1 farooqshabbir98/to-do-react:last-known-good
       - run:
           name: Login to Docker Hub with retry
           command: |
@@ -69,38 +67,33 @@ jobs:
             retry_count=0
             max_retries=5
             
-            # Function to push with retry
-            push_with_retry() {
-              local tag=$1
-              local attempts=0
-              until [ $attempts -ge $max_retries ]
-              do
-                docker push farooqshabbir98/to-do-react:$tag && return 0
-                attempts=$((attempts+1))
-                echo "Push attempt $attempts for tag $tag failed. Retrying in 10 seconds..."
-                sleep 10
-              done
-              return 1
-            }
+            # Push v1 tag with retry logic
+            until [ $retry_count -ge $max_retries ]
+            do
+              docker push farooqshabbir98/to-do-react:v1 && break
+              retry_count=$((retry_count+1))
+              echo "Push attempt $retry_count failed. Retrying in 10 seconds..."
+              sleep 10
+            done
             
-            # Push all tags with retry
-            push_with_retry "v1" || exit 1
-            push_with_retry "${CIRCLE_SHA1}" || exit 1
-            push_with_retry "last-known-good" || exit 1
+            if [ $retry_count -ge $max_retries ]; then
+              echo "Push failed after $max_retries attempts"
+              exit 1
+            fi
             
-            echo "All tags pushed successfully"
+            echo "Image pushed successfully"
       - run:
           name: Save commit SHA for rollback
           command: |
             echo "${CIRCLE_SHA1}" > /tmp/last-successful-commit.txt
       - store_artifacts:
           path: /tmp/last-successful-commit.txt
-          destination: last-successful-commit
-
-  rollback-deployment:
-    docker:
-      - image: cimg/base:stable
-    steps:
+          destinTag as last-known-good for rollback
+          command: |
+            # After successful push, save this version for rollback
+            docker tag farooqshabbir98/to-do-react:v1 farooqshabbir98/to-do-react:last-known-good
+            docker push farooqshabbir98/to-do-react:last-known-good
+            echo "Backup tag created: last-known-good"
       - checkout
       - setup_remote_docker:
           docker_layer_caching: true
