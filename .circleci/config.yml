@@ -2,6 +2,7 @@ version: 2.1
 
 orbs:
   node: circleci/node@5.1.0
+  docker: circleci/docker@2.2.0
 
 jobs:
   build-and-test:
@@ -19,38 +20,33 @@ jobs:
           paths:
             - dist
 
-  deploy:
+  build-and-push-docker:
     docker:
-      - image: cimg/node:18.19
+      - image: cimg/base:stable
     steps:
       - checkout
-      - attach_workspace:
-          at: .
+      - setup_remote_docker:
+          version: 20.10.14
+          docker_layer_caching: true
       - run:
-          name: Deploy to hosting
+          name: Build Docker image
           command: |
-            # Add your deployment commands here
-            # Examples below:
-            
-            # For Netlify:
-            # npm install -g netlify-cli
-            # netlify deploy --prod --dir=dist --auth=$NETLIFY_AUTH_TOKEN --site=$NETLIFY_SITE_ID
-            
-            # For Vercel:
-            # npm install -g vercel
-            # vercel --prod --token=$VERCEL_TOKEN
-            
-            # For GitHub Pages:
-            # npm install -g gh-pages
-            # gh-pages -d dist
-            
-            echo "Add your deployment command here"
+            docker build -t to-do-react-image:v1 .
+            docker tag to-do-react-image:v1 farooqshabbir98/to-do-react:v1
+      - run:
+          name: Login to Docker Hub
+          command: |
+            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+      - run:
+          name: Push to Docker Hub
+          command: |
+            docker push farooqshabbir98/to-do-react:v1
 
 workflows:
   build-deploy:
     jobs:
       - build-and-test
-      - deploy:
+      - build-and-push-docker:
           requires:
             - build-and-test
           filters:
