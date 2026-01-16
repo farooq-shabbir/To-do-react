@@ -8,14 +8,15 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.js'],
+    include: ['src/**/*.{test,spec}.{js,jsx}'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'lcov'],
       exclude: [
         'node_modules/',
         'src/test/',
-        '**/*.test.js',
-        '**/*.spec.js',
+        '**/*.test.jsx',
+        '**/*.spec.jsx',
       ],
       lines: 50,
       functions: 50,
