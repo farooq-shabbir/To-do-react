@@ -11,3 +11,5 @@ README.md
 .DS_Store
 coverage
 *.log
+vitest.config.js
+.eslintrc.cjs
