@@ -1,9 +1,8 @@
 node_modules
 npm-debug.log
-#dist
+dist
 .git
 .gitignore
-README.md
 .env
 .env.local
 .vscode
@@ -13,3 +12,5 @@ coverage
 *.log
 vitest.config.js
 .eslintrc.cjs
+.dockerignore
+Dockerfile
