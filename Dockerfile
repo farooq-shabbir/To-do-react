@@ -12,6 +12,9 @@ RUN npm install
 # Copy source code
 COPY . .
 
+# Verify index.html is present
+RUN ls -la && echo "Checking for index.html:" && ls -la index.html
+
 # Build the application
 RUN npm run build
 
