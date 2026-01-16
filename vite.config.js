@@ -17,7 +17,12 @@ export default defineConfig({
         '**/*.test.js',
         '**/*.spec.js',
       ],
+      lines: 50,
+      functions: 50,
+      branches: 50,
+      statements: 50,
     },
+    testTimeout: 10000,
   },
   resolve: {
     alias: {
