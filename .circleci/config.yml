@@ -217,12 +217,16 @@ jobs:
             # Clean any untracked files to prevent issues
             ls -la
             
+            # Get short commit hash from CircleCI env var
+            SHORT_SHA=$(echo $CIRCLE_SHA1 | cut -c1-7)
+            
             # Build image
             docker build -t $DOCKERHUB_USER/to-do-react:latest .
-            docker tag $DOCKERHUB_USER/to-do-react:latest $DOCKERHUB_USER/to-do-react:$(git rev-parse --short HEAD)
+            docker tag $DOCKERHUB_USER/to-do-react:latest $DOCKERHUB_USER/to-do-react:$SHORT_SHA
             docker tag $DOCKERHUB_USER/to-do-react:latest $DOCKERHUB_USER/to-do-react:v1.0.$(date +%Y%m%d)
             
             echo "Docker image built successfully"
+            echo "Tags: latest, $SHORT_SHA, v1.0.$(date +%Y%m%d)"
 
       # Validate Docker image
       - run:
@@ -250,6 +254,9 @@ jobs:
             RETRY_DELAY=15
             PUSH_SUCCESS=false
             
+            # Get short commit hash from CircleCI env var
+            SHORT_SHA=$(echo $CIRCLE_SHA1 | cut -c1-7)
+            
             while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
               echo "========================================="
               echo "Push Attempt $ATTEMPT of $MAX_ATTEMPTS"
@@ -261,7 +268,7 @@ jobs:
                 
                 # Attempt push
                 if docker push $DOCKERHUB_USER/to-do-react:latest && \
-                   docker push $DOCKERHUB_USER/to-do-react:$(git rev-parse --short HEAD) && \
+                   docker push $DOCKERHUB_USER/to-do-react:$SHORT_SHA && \
                    docker push $DOCKERHUB_USER/to-do-react:v1.0.$(date +%Y%m%d); then
                   echo "✓ Successfully pushed all tags to Docker Hub!"
                   PUSH_SUCCESS=true
