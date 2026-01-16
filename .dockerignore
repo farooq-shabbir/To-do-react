@@ -1,16 +1,11 @@
 node_modules
-npm-debug.log
-dist
 .git
-.gitignore
 .env
 .env.local
 .vscode
-.circleci
 .DS_Store
 coverage
+npm-debug.log
 *.log
 vitest.config.js
 .eslintrc.cjs
-.dockerignore
-Dockerfile
