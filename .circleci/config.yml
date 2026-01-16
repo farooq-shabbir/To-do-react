@@ -262,22 +262,15 @@ jobs:
               echo "Push Attempt $ATTEMPT of $MAX_ATTEMPTS"
               echo "========================================="
               
-              # Check if Docker Hub is accessible
-              if curl -s -f https://hub.docker.com/v2/users/login > /dev/null 2>&1; then
-                echo "✓ Docker Hub is accessible"
-                
-                # Attempt push
-                if docker push $DOCKERHUB_USER/to-do-react:latest && \
-                   docker push $DOCKERHUB_USER/to-do-react:$SHORT_SHA && \
-                   docker push $DOCKERHUB_USER/to-do-react:v1.0.$(date +%Y%m%d); then
-                  echo "✓ Successfully pushed all tags to Docker Hub!"
-                  PUSH_SUCCESS=true
-                  break
-                else
-                  echo "✗ Push failed - possible network issue"
-                fi
+              # Attempt push directly
+              if docker push $DOCKERHUB_USER/to-do-react:latest && \
+                 docker push $DOCKERHUB_USER/to-do-react:$SHORT_SHA && \
+                 docker push $DOCKERHUB_USER/to-do-react:v1.0.$(date +%Y%m%d); then
+                echo "✓ Successfully pushed all tags to Docker Hub!"
+                PUSH_SUCCESS=true
+                break
               else
-                echo "✗ Docker Hub is down or unreachable"
+                echo "✗ Push failed on attempt $ATTEMPT"
               fi
               
               ATTEMPT=$((ATTEMPT + 1))
