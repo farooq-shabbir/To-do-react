@@ -1,135 +1,323 @@
 version: 2.1
 
 orbs:
-  node: circleci/node@5.1.0
   docker: circleci/docker@2.2.0
 
 jobs:
-  build-and-test:
+  build:
     docker:
-      - image: cimg/node:18.19
+      - image: cimg/node:18.17.0
+    working_directory: ~/to-do-react
     steps:
       - checkout
-      - node/install-packages:
-          pkg-manager: npm
+
+      # Restore cache for node_modules
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "package-lock.json" }}
+            - v1-dependencies-
+
+      # Install dependencies
       - run:
-          name: Build application
+          name: Install dependencies
+          command: npm install
+
+      # Save cache for node_modules
+      - save_cache:
+          key: v1-dependencies-{{ checksum "package-lock.json" }}
+          paths:
+            - node_modules
+          when: always
+
+      # Build the React app with Vite
+      - run:
+          name: Build React application
           command: npm run build
+
+      # Verify build output exists
+      - run:
+          name: Verify build artifacts
+          command: |
+            if [ ! -d "dist" ]; then
+              echo "ERROR: Build failed - dist folder not found"
+              exit 1
+            fi
+            echo "Build verification successful"
+
+      # Store build artifacts
       - persist_to_workspace:
-          root: .
+          root: ~/to-do-react
           paths:
             - dist
+            - Dockerfile
+            - package.json
+            - package-lock.json
 
-  build-and-push-docker:
+  test:
     docker:
-      - image: cimg/base:stable
+      - image: cimg/node:18.17.0
+    working_directory: ~/to-do-react
     steps:
       - checkout
-      - setup_remote_docker:
-          # version: 20.10.14
-          docker_layer_caching: true
-      - run:
-          name: Build Docker image with retry
-          command: |
-            retry_count=0
-            max_retries=3
-            until [ $retry_count -ge $max_retries ]
-            do
-              docker build -t to-do-react-image:v1 . && break
-              retry_count=$((retry_count+1))
-              echo "Build attempt $retry_count failed. Retrying in 10 seconds..."
-              sleep 10
-            done
-            if [ $retry_count -ge $max_retries ]; then
-              echo "Build failed after $max_retries attempts"
-              exit 1
-            fi
-            docker tag to-do-react-image:v1 farooqshabbir98/to-do-react:v1
-      - run:
-          name: Login to Docker Hub with retry
-          command: |
-            retry_count=0
-            max_retries=5
-            until [ $retry_count -ge $max_retries ]
-            do
-              echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin && break
-              retry_count=$((retry_count+1))
-              echo "Login attempt $retry_count failed. Retrying in 5 seconds..."
-              sleep 5
-            done
-            if [ $retry_count -ge $max_retries ]; then
-              echo "Docker Hub login failed after $max_retries attempts"
-              exit 1
-            fi
-      - run:
-          name: Push to Docker Hub with retry
-          command: |
-            retry_count=0
-            max_retries=5
-            
-            # Push v1 tag with retry logic
-            until [ $retry_count -ge $max_retries ]
-            do
-              docker push farooqshabbir98/to-do-react:v1 && break
-              retry_count=$((retry_count+1))
-              echo "Push attempt $retry_count failed. Retrying in 10 seconds..."
-              sleep 10
-            done
-            
-            if [ $retry_count -ge $max_retries ]; then
-              echo "Push failed after $max_retries attempts"
-              exit 1
-            fi
-            
-            echo "Image pushed successfully"
-      - run:
-          name: Tag as last-known-good for rollback
-          command: |
-            # After successful push, save this version for rollback
-            docker tag farooqshabbir98/to-do-react:v1 farooqshabbir98/to-do-react:last-known-good
-            docker push farooqshabbir98/to-do-react:last-known-good
-            echo "Backup tag created: last-known-good"
 
-  rollback-deployment:
+      # Restore cached dependencies
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "package-lock.json" }}
+            - v1-dependencies-
+
+      # Install dependencies
+      - run:
+          name: Install dependencies
+          command: npm install
+
+      # Run tests with timeout
+      - run:
+          name: Run unit tests
+          command: npm test
+          timeout: 5m
+
+      # Run ESLint (STRICT - fails on warnings)
+      - run:
+          name: Run ESLint code quality checks
+          command: npm run lint
+
+      # Store test results
+      - store_test_results:
+          path: coverage
+
+      # Store coverage artifacts (limit retention)
+      - store_artifacts:
+          path: coverage
+          destination: coverage
+          retention-days: 3
+
+  rollback_build_test:
     docker:
-      - image: cimg/base:stable
+      - image: cimg/node:18.17.0
+    working_directory: ~/to-do-react
     steps:
       - checkout
+
+      # Get and checkout previous commit
+      - run:
+          name: Checkout previous commit
+          command: |
+            PREV_COMMIT=$(git rev-parse HEAD~1)
+            echo "Rolling back to commit: $PREV_COMMIT"
+            git checkout $PREV_COMMIT
+
+      # Restore cache
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "package-lock.json" }}
+            - v1-dependencies-
+
+      # Install dependencies
+      - run:
+          name: Install dependencies
+          command: npm install
+
+      # Save cache
+      - save_cache:
+          key: v1-dependencies-{{ checksum "package-lock.json" }}
+          paths:
+            - node_modules
+          when: always
+
+      # Build
+      - run:
+          name: Build React application (Rollback)
+          command: npm run build
+
+      # Verify build output
+      - run:
+          name: Verify rollback build artifacts
+          command: |
+            if [ ! -d "dist" ]; then
+              echo "ERROR: Rollback build failed - dist folder not found"
+              exit 1
+            fi
+            echo "Rollback build verification successful"
+
+      # Test
+      - run:
+          name: Run unit tests (Rollback)
+          command: npm test
+          timeout: 5m
+
+      # Lint
+      - run:
+          name: Run ESLint (Rollback)
+          command: npm run lint
+
+      # If successful, persist to workspace
+      - persist_to_workspace:
+          root: ~/to-do-react
+          paths:
+            - dist
+            - Dockerfile
+            - package.json
+            - package-lock.json
+
+  deploy_to_dockerhub:
+    docker:
+      - image: cimg/base:2023.09
+    steps:
       - setup_remote_docker:
-          docker_layer_caching: true
+          version: 20.10.24
+
+      # Attach workspace from previous job
+      - attach_workspace:
+          at: ~/to-do-react
+
+      # Login to Docker Hub
       - run:
           name: Login to Docker Hub
           command: |
-            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+            if [ -z "$DOCKERHUB_USER" ] || [ -z "$DOCKERHUB_PASS" ]; then
+              echo "ERROR: Docker Hub credentials not set"
+              exit 1
+            fi
+            echo $DOCKERHUB_PASS | docker login -u $DOCKERHUB_USER --password-stdin
+
+      # Build Docker image with build validation
       - run:
-          name: Rollback to last known good version
+          name: Build Docker image
           command: |
-            # Pull the last known good image
-            docker pull farooqshabbir98/to-do-react:last-known-good
+            cd ~/to-do-react
             
-            # Re-tag it as v1 (current version)
-            docker tag farooqshabbir98/to-do-react:last-known-good farooqshabbir98/to-do-react:v1
+            # Verify Dockerfile exists
+            if [ ! -f "Dockerfile" ]; then
+              echo "ERROR: Dockerfile not found"
+              exit 1
+            fi
             
-            # Push the rollback version
-            docker push farooqshabbir98/to-do-react:v1
+            # Verify dist folder exists
+            if [ ! -d "dist" ]; then
+              echo "ERROR: dist folder not found - build artifacts missing"
+              exit 1
+            fi
             
-            echo "Rollback completed successfully to last-known-good version"
+            # Build image
+            docker build -t $DOCKERHUB_USER/to-do-react:latest .
+            docker tag $DOCKERHUB_USER/to-do-react:latest $DOCKERHUB_USER/to-do-react:$(git rev-parse --short HEAD)
+            docker tag $DOCKERHUB_USER/to-do-react:latest $DOCKERHUB_USER/to-do-react:v1.0.$(date +%Y%m%d)
+            
+            echo "Docker image built successfully"
+
+      # Validate Docker image
+      - run:
+          name: Validate Docker image
+          command: |
+            # Test if image can be run (just verify it starts)
+            docker run --rm -d --name test-container $DOCKERHUB_USER/to-do-react:latest
+            sleep 2
+            
+            # Check if container is running
+            if docker ps | grep -q test-container; then
+              echo "✓ Container started successfully"
+              docker stop test-container
+            else
+              echo "ERROR: Container failed to start"
+              exit 1
+            fi
+
+      # Push with smart retry logic
+      - run:
+          name: Push Docker image with smart retry
+          command: |
+            MAX_ATTEMPTS=3
+            ATTEMPT=1
+            RETRY_DELAY=15
+            PUSH_SUCCESS=false
+            
+            while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+              echo "========================================="
+              echo "Push Attempt $ATTEMPT of $MAX_ATTEMPTS"
+              echo "========================================="
+              
+              # Check if Docker Hub is accessible
+              if curl -s -f https://hub.docker.com/v2/users/login > /dev/null 2>&1; then
+                echo "✓ Docker Hub is accessible"
+                
+                # Attempt push
+                if docker push $DOCKERHUB_USER/to-do-react:latest && \
+                   docker push $DOCKERHUB_USER/to-do-react:$(git rev-parse --short HEAD) && \
+                   docker push $DOCKERHUB_USER/to-do-react:v1.0.$(date +%Y%m%d); then
+                  echo "✓ Successfully pushed all tags to Docker Hub!"
+                  PUSH_SUCCESS=true
+                  break
+                else
+                  echo "✗ Push failed - possible network issue"
+                fi
+              else
+                echo "✗ Docker Hub is down or unreachable"
+              fi
+              
+              ATTEMPT=$((ATTEMPT + 1))
+              
+              # If not the last attempt, wait before retry
+              if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$PUSH_SUCCESS" = false ]; then
+                echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+                sleep $RETRY_DELAY
+              fi
+            done
+            
+            if [ "$PUSH_SUCCESS" = false ]; then
+              echo "✗ Failed to push after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+
+      # Logout from Docker Hub
+      - run:
+          name: Logout from Docker Hub
+          command: docker logout
+          when: always
+
+  notify_failure:
+    docker:
+      - image: cimg/base:2023.09
+    steps:
+      - run:
+          name: Pipeline Failed
+          command: |
+            echo "Pipeline execution failed. Check CircleCI dashboard for details."
+            echo "Failed Job: ${CIRCLE_JOB}"
+            echo "Commit: ${CIRCLE_SHA1}"
 
 workflows:
-  build-deploy:
+  build_test_deploy:
     jobs:
-      - build-and-test
-      - build-and-push-docker:
+      # Step 1: Build
+      - build:
+          name: Build Application
+
+      # Step 2: Test (depends on build)
+      - test:
+          name: Run Tests
           requires:
-            - build-and-test
-          filters:
-            branches:
-              only: main
-  
-  rollback:
-    jobs:
-      - hold-for-approval:
-          type: approval
-      - rollback-deployment:
+            - Build Application
+
+      # Step 3: If build or test fails, attempt rollback
+      - rollback_build_test:
+          name: Rollback to Previous Commit
           requires:
-            - hold-for-approval
+            - Run Tests
+          when: on_fail
+
+      # Step 4: If tests pass, proceed to deploy
+      - deploy_to_dockerhub:
+          name: Deploy to Docker Hub
+          requires:
+            - Run Tests
+          when: on_success
+          context:
+            - docker-hub-credentials
+
+      # Step 5: Notify if rollback fails
+      - notify_failure:
+          name: Notify Failure
+          requires:
+            - Rollback to Previous Commit
+          when: on_fail
