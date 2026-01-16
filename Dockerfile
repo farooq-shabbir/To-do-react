@@ -27,39 +27,8 @@ RUN apk add --no-cache curl
 # Copy built files from build stage
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Create nginx configuration for SPA (Single Page Application)
-RUN cat > /etc/nginx/conf.d/default.conf <<EOF
-server {
-    listen 80;
-    server_name _;
-    
-    root /usr/share/nginx/html;
-    
-    # Gzip compression
-    gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-    
-    # Cache static files
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-    
-    # Route all requests to index.html for React Router
-    location / {
-        try_files \$uri \$uri/ /index.html;
-        expires -1;
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
-    }
-    
-    # Health check endpoint
-    location /health {
-        access_log off;
-        return 200 "healthy\n";
-        add_header Content-Type text/plain;
-    }
-}
-EOF
+# Copy nginx configuration
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Expose port 80
 EXPOSE 80
