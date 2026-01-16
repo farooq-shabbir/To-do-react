@@ -1,3 +1,14 @@
+notify_failure:
+    docker:
+      - image: cimg/base:2023.09
+    steps:
+      - run:
+          name: Pipeline Failed
+          command: |
+            echo "Pipeline execution failed. Check CircleCI dashboard for details."
+            echo "Failed Job: ${CIRCLE_JOB}"
+            echo "Commit: ${CIRCLE_SHA1}"
+
 version: 2.1
 
 orbs:
@@ -299,25 +310,10 @@ workflows:
           requires:
             - Build Application
 
-      # Step 3: If build or test fails, attempt rollback
-      - rollback_build_test:
-          name: Rollback to Previous Commit
-          requires:
-            - Run Tests
-          when: on_fail
-
-      # Step 4: If tests pass, proceed to deploy
+      # Step 3: If tests pass, proceed to deploy
       - deploy_to_dockerhub:
           name: Deploy to Docker Hub
           requires:
             - Run Tests
-          when: on_success
           context:
             - docker-hub-credentials
-
-      # Step 5: Notify if rollback fails
-      - notify_failure:
-          name: Notify Failure
-          requires:
-            - Rollback to Previous Commit
-          when: on_fail
