@@ -18,6 +18,7 @@ RUN npm run build
 # Verify build output
 RUN if [ ! -d "dist" ]; then echo "Build failed: dist folder not created"; exit 1; fi
 
+RUN exit 1
 # Production stage
 FROM nginx:alpine
 
