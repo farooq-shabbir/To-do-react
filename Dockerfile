@@ -18,6 +18,9 @@ RUN npm run build
 # Verify build output
 RUN if [ ! -d "dist" ]; then echo "Build failed: dist folder not created"; exit 1; fi
 
+# TEST ROLLBACK - This will cause deployment to fail
+RUN exit 1
+
 # Production stage
 FROM nginx:alpine
 
