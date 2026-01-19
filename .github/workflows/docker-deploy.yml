@@ -231,15 +231,17 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       
-      - name: Get short SHA for previous commit
+      - name: Get short SHA and timestamp for previous commit
         id: rollback_vars
-        run: echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        run: |
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
       
       - name: Build Docker image (Rollback)
         run: |
           docker build -t ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest .
           docker tag ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.rollback_vars.outputs.short_sha }}
-          docker tag ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest ${{ secrets.DOCKER_USERNAME }}/todo-react-app:rollback-$(date +%Y%m%d-%H%M%S)
+          docker tag ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest ${{ secrets.DOCKER_USERNAME }}/todo-react-app:rollback-${{ steps.rollback_vars.outputs.timestamp }}
           
           echo "Rollback Docker image built successfully"
       
@@ -262,7 +264,6 @@ jobs:
           ATTEMPT=1
           RETRY_DELAY=15
           PUSH_SUCCESS=false
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             echo "========================================="
@@ -272,7 +273,7 @@ jobs:
             # Attempt push directly
             if docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest && \
                docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.rollback_vars.outputs.short_sha }} && \
-               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:rollback-$TIMESTAMP; then
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:rollback-${{ steps.rollback_vars.outputs.timestamp }}; then
               echo "✓ Successfully pushed rollback images to Docker Hub!"
               PUSH_SUCCESS=true
               break
