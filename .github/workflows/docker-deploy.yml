@@ -138,21 +138,41 @@ jobs:
           fi
       
       - name: Push Docker image with smart retry
-        uses: nick-fields/retry-action@v2
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 15
-          command: |
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          RETRY_DELAY=15
+          PUSH_SUCCESS=false
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             echo "========================================="
-            echo "Pushing Docker images to Docker Hub"
+            echo "Push Attempt $ATTEMPT of $MAX_ATTEMPTS"
             echo "========================================="
             
-            docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest
-            docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.vars.outputs.short_sha }}
-            docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:v1.0.$(date +%Y%m%d)
+            # Attempt push directly
+            if docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest && \
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.vars.outputs.short_sha }} && \
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:v1.0.$(date +%Y%m%d); then
+              echo "✓ Successfully pushed all tags to Docker Hub!"
+              PUSH_SUCCESS=true
+              break
+            else
+              echo "✗ Push failed on attempt $ATTEMPT"
+            fi
             
-            echo "✓ Successfully pushed all tags to Docker Hub!"
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            # If not the last attempt, wait before retry
+            if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$PUSH_SUCCESS" = false ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          
+          if [ "$PUSH_SUCCESS" = false ]; then
+            echo "✗ Failed to push after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
       
       - name: Logout from Docker Hub
         if: always()
@@ -237,21 +257,42 @@ jobs:
           fi
       
       - name: Push rollback image with retry
-        uses: nick-fields/retry-action@v2
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 15
-          command: |
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          RETRY_DELAY=15
+          PUSH_SUCCESS=false
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             echo "========================================="
-            echo "Pushing rollback images to Docker Hub"
+            echo "Push Attempt $ATTEMPT of $MAX_ATTEMPTS"
             echo "========================================="
             
-            docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest
-            docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.rollback_vars.outputs.short_sha }}
-            docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:rollback-$(date +%Y%m%d-%H%M%S)
+            # Attempt push directly
+            if docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest && \
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.rollback_vars.outputs.short_sha }} && \
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:rollback-$TIMESTAMP; then
+              echo "✓ Successfully pushed rollback images to Docker Hub!"
+              PUSH_SUCCESS=true
+              break
+            else
+              echo "✗ Push failed on attempt $ATTEMPT"
+            fi
             
-            echo "✓ Successfully pushed rollback images to Docker Hub!"
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            # If not the last attempt, wait before retry
+            if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$PUSH_SUCCESS" = false ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          
+          if [ "$PUSH_SUCCESS" = false ]; then
+            echo "✗ Failed to push after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
       
       - name: Logout from Docker Hub
         if: always()
