@@ -1,0 +1,465 @@
+name: Build and Deploy Directly to Local Server (No Docker Hub)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build React application
+        run: npm run build
+      
+      - name: Verify build artifacts
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "ERROR: Build failed - dist folder not found"
+            exit 1
+          fi
+          echo "Build verification successful"
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            dist
+            Dockerfile
+            nginx.conf
+          retention-days: 7
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Run unit tests
+        run: npm test
+        timeout-minutes: 5
+      
+      - name: Run ESLint code quality checks
+        run: npm run lint
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.event_name != 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Get short SHA
+        id: vars
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+      
+      - name: Build Docker image
+        run: |
+          # Verify Dockerfile exists
+          if [ ! -f "Dockerfile" ]; then
+            echo "ERROR: Dockerfile not found"
+            exit 1
+          fi
+          
+          # Verify dist folder exists
+          if [ ! -d "dist" ]; then
+            echo "ERROR: dist folder not found - build artifacts missing"
+            exit 1
+          fi
+          
+          # Build image with specific tag
+          docker build -t todo-react-app:${{ steps.vars.outputs.short_sha }} .
+          docker tag todo-react-app:${{ steps.vars.outputs.short_sha }} todo-react-app:latest
+          
+          echo "Docker image built successfully"
+          echo "Tags: latest, ${{ steps.vars.outputs.short_sha }}"
+      
+      - name: Validate Docker image
+        run: |
+          # Test if image can be run
+          docker run --rm -d --name test-container todo-react-app:latest
+          sleep 2
+          
+          # Check if container is running
+          if docker ps | grep -q test-container; then
+            echo "✓ Container started successfully"
+            docker stop test-container
+          else
+            echo "ERROR: Container failed to start"
+            exit 1
+          fi
+      
+      - name: Save Docker image to tar file
+        run: |
+          echo "Saving Docker image to tar file..."
+          docker save todo-react-app:latest | gzip > todo-react-app.tar.gz
+          ls -lh todo-react-app.tar.gz
+          echo "✓ Docker image saved successfully"
+      
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
+      
+      - name: Test SSH Connection
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✓ SSH connection successful'"
+      
+      - name: Transfer Docker image to server with retry
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          RETRY_DELAY=10
+          TRANSFER_SUCCESS=false
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "========================================="
+            echo "Transfer Attempt $ATTEMPT of $MAX_ATTEMPTS"
+            echo "========================================="
+            
+            if scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa \
+                   -o CompressionLevel=9 \
+                   todo-react-app.tar.gz \
+                   ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/todo-react-app.tar.gz; then
+              echo "✓ Successfully transferred Docker image!"
+              TRANSFER_SUCCESS=true
+              break
+            else
+              echo "✗ Transfer failed on attempt $ATTEMPT"
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$TRANSFER_SUCCESS" = false ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          
+          if [ "$TRANSFER_SUCCESS" = false ]; then
+            echo "✗ Failed to transfer after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+      
+      - name: Deploy to Local Server with retry
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          RETRY_DELAY=10
+          DEPLOY_SUCCESS=false
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "========================================="
+            echo "Deploy Attempt $ATTEMPT of $MAX_ATTEMPTS"
+            echo "========================================="
+            
+            if ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+              set -e
+              
+              # Check if Docker is installed
+              if ! command -v docker &> /dev/null; then
+                echo "ERROR: Docker is not installed on the server"
+                exit 1
+              fi
+              
+              echo "✓ Docker is installed"
+              
+              # Load Docker image from tar file
+              echo "Loading Docker image..."
+              if docker load < /tmp/todo-react-app.tar.gz; then
+                echo "✓ Docker image loaded successfully"
+              else
+                echo "ERROR: Failed to load Docker image"
+                exit 1
+              fi
+              
+              # Clean up tar file
+              rm -f /tmp/todo-react-app.tar.gz
+              echo "✓ Cleaned up tar file"
+              
+              # Stop and remove existing container if it exists
+              if docker ps -a | grep -q todo-react-app; then
+                echo "Stopping existing container..."
+                docker stop todo-react-app || true
+                docker rm todo-react-app || true
+                echo "✓ Removed existing container"
+              fi
+              
+              # Remove old images to save space (keep latest)
+              echo "Cleaning up old images..."
+              docker image prune -f
+              
+              # Run the new container
+              echo "Starting new container..."
+              docker run -d \
+                --name todo-react-app \
+                --restart unless-stopped \
+                -p ${{ secrets.APP_PORT || 80 }}:80 \
+                todo-react-app:latest
+              
+              # Wait for container to start
+              sleep 3
+              
+              # Verify container is running
+              if docker ps | grep -q todo-react-app; then
+                echo "✓ Container is running successfully"
+                
+                # Health check
+                CONTAINER_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' todo-react-app)
+                echo "Container IP: $CONTAINER_IP"
+                
+                # Test if application is responding
+                if docker exec todo-react-app ls /usr/share/nginx/html/index.html > /dev/null 2>&1; then
+                  echo "✓ Application files are present"
+                else
+                  echo "WARNING: Application files not found"
+                fi
+                
+                echo "========================================="
+                echo "✓ DEPLOYMENT SUCCESSFUL"
+                echo "========================================="
+                exit 0
+              else
+                echo "ERROR: Container failed to start"
+                docker logs todo-react-app || true
+                exit 1
+              fi
+          ENDSSH
+            then
+              echo "✓ Successfully deployed to local server!"
+              DEPLOY_SUCCESS=true
+              break
+            else
+              echo "✗ Deploy failed on attempt $ATTEMPT"
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$DEPLOY_SUCCESS" = false ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          
+          if [ "$DEPLOY_SUCCESS" = false ]; then
+            echo "✗ Failed to deploy after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+      
+      - name: Verify deployment
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+            echo "========================================="
+            echo "DEPLOYMENT VERIFICATION"
+            echo "========================================="
+            echo "Running containers:"
+            docker ps --filter "name=todo-react-app" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            echo ""
+            echo "Container logs (last 10 lines):"
+            docker logs --tail 10 todo-react-app
+            echo ""
+            echo "Disk usage:"
+            docker system df
+            echo "========================================="
+          ENDSSH
+      
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_rsa
+
+  rollback:
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: failure() && github.event_name != 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      
+      - name: Checkout previous commit
+        run: |
+          PREV_COMMIT=$(git rev-parse HEAD~1)
+          echo "Rolling back to commit: $PREV_COMMIT"
+          git checkout $PREV_COMMIT
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build React application (Rollback)
+        run: npm run build
+      
+      - name: Verify rollback build artifacts
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "ERROR: Rollback build failed - dist folder not found"
+            exit 1
+          fi
+          echo "Rollback build verification successful"
+      
+      - name: Run unit tests (Rollback)
+        run: npm test
+        timeout-minutes: 5
+      
+      - name: Run ESLint (Rollback)
+        run: npm run lint
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Get short SHA for rollback
+        id: rollback_vars
+        run: |
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+      
+      - name: Build Docker image (Rollback)
+        run: |
+          docker build -t todo-react-app:rollback-${{ steps.rollback_vars.outputs.timestamp }} .
+          docker tag todo-react-app:rollback-${{ steps.rollback_vars.outputs.timestamp }} todo-react-app:latest
+          echo "Rollback Docker image built successfully"
+      
+      - name: Validate Docker image (Rollback)
+        run: |
+          docker run --rm -d --name test-container-rollback todo-react-app:latest
+          sleep 2
+          
+          if docker ps | grep -q test-container-rollback; then
+            echo "✓ Rollback container started successfully"
+            docker stop test-container-rollback
+          else
+            echo "ERROR: Rollback container failed to start"
+            exit 1
+          fi
+      
+      - name: Save rollback Docker image
+        run: |
+          echo "Saving rollback Docker image..."
+          docker save todo-react-app:latest | gzip > todo-react-app-rollback.tar.gz
+          ls -lh todo-react-app-rollback.tar.gz
+          echo "✓ Rollback image saved successfully"
+      
+      - name: Setup SSH key for rollback
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
+      
+      - name: Transfer rollback image to server
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa \
+              -o CompressionLevel=9 \
+              todo-react-app-rollback.tar.gz \
+              ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/todo-react-app.tar.gz
+      
+      - name: Deploy rollback to Local Server
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+            set -e
+            
+            echo "========================================="
+            echo "ROLLING BACK TO PREVIOUS VERSION"
+            echo "========================================="
+            
+            # Load rollback image
+            docker load < /tmp/todo-react-app.tar.gz
+            rm -f /tmp/todo-react-app.tar.gz
+            
+            # Stop current container
+            docker stop todo-react-app || true
+            docker rm todo-react-app || true
+            
+            # Start rollback container
+            docker run -d \
+              --name todo-react-app \
+              --restart unless-stopped \
+              -p ${{ secrets.APP_PORT || 80 }}:80 \
+              todo-react-app:latest
+            
+            sleep 3
+            
+            if docker ps | grep -q todo-react-app; then
+              echo "✓ Rollback deployment successful"
+            else
+              echo "ERROR: Rollback deployment failed"
+              exit 1
+            fi
+          ENDSSH
+      
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_rsa
+      
+      - name: Notify rollback completed
+        run: |
+          echo "========================================="
+          echo "ROLLBACK COMPLETED"
+          echo "========================================="
+          echo "Pipeline failed, rolled back to previous commit"
+          echo "Previous commit: $(git rev-parse HEAD)"
+          echo "Rollback image deployed to local server"
+
+  notify_failure:
+    runs-on: ubuntu-latest
+    needs: [build, test, deploy, rollback]
+    if: always() && (needs.build.result == 'failure' || needs.test.result == 'failure' || needs.deploy.result == 'failure')
+    
+    steps:
+      - name: Pipeline Failed Notification
+        run: |
+          echo "========================================="
+          echo "PIPELINE EXECUTION FAILED"
+          echo "========================================="
+          echo "Failed Job: Check the workflow run for details"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Actor: ${{ github.actor }}"

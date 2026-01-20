@@ -1,0 +1,520 @@
+name: Build, Push and Deploy to Local Server
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build React application
+        run: npm run build
+      
+      - name: Verify build artifacts
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "ERROR: Build failed - dist folder not found"
+            exit 1
+          fi
+          echo "Build verification successful"
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            dist
+            Dockerfile
+            nginx.conf
+            package.json
+            package-lock.json
+          retention-days: 7
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Run unit tests
+        run: npm test
+        timeout-minutes: 5
+      
+      - name: Run ESLint code quality checks
+        run: npm run lint
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.event_name != 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Get short SHA
+        id: vars
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+      
+      - name: Build Docker image
+        run: |
+          # Verify Dockerfile exists
+          if [ ! -f "Dockerfile" ]; then
+            echo "ERROR: Dockerfile not found"
+            exit 1
+          fi
+          
+          # Verify dist folder exists
+          if [ ! -d "dist" ]; then
+            echo "ERROR: dist folder not found - build artifacts missing"
+            exit 1
+          fi
+          
+          # Build image
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest .
+          docker tag ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.vars.outputs.short_sha }}
+          docker tag ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest ${{ secrets.DOCKER_USERNAME }}/todo-react-app:v1.0.$(date +%Y%m%d)
+          
+          echo "Docker image built successfully"
+          echo "Tags: latest, ${{ steps.vars.outputs.short_sha }}, v1.0.$(date +%Y%m%d)"
+      
+      - name: Validate Docker image
+        run: |
+          # Test if image can be run (just verify it starts)
+          docker run --rm -d --name test-container ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest
+          sleep 2
+          
+          # Check if container is running
+          if docker ps | grep -q test-container; then
+            echo "✓ Container started successfully"
+            docker stop test-container
+          else
+            echo "ERROR: Container failed to start"
+            exit 1
+          fi
+      
+      - name: Push Docker image with smart retry
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          RETRY_DELAY=15
+          PUSH_SUCCESS=false
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "========================================="
+            echo "Push Attempt $ATTEMPT of $MAX_ATTEMPTS"
+            echo "========================================="
+            
+            # Attempt push directly
+            if docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest && \
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.vars.outputs.short_sha }} && \
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:v1.0.$(date +%Y%m%d); then
+              echo "✓ Successfully pushed all tags to Docker Hub!"
+              PUSH_SUCCESS=true
+              break
+            else
+              echo "✗ Push failed on attempt $ATTEMPT"
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            # If not the last attempt, wait before retry
+            if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$PUSH_SUCCESS" = false ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          
+          if [ "$PUSH_SUCCESS" = false ]; then
+            echo "✗ Failed to push after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+      
+      - name: Logout from Docker Hub
+        if: always()
+        run: docker logout
+
+  deploy_to_local_server:
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: github.event_name != 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
+      
+      - name: Test SSH Connection
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✓ SSH connection successful'"
+      
+      - name: Deploy to Local Server with retry
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          RETRY_DELAY=10
+          DEPLOY_SUCCESS=false
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "========================================="
+            echo "Deploy Attempt $ATTEMPT of $MAX_ATTEMPTS"
+            echo "========================================="
+            
+            if ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+              set -e
+              
+              # Check if Docker is installed
+              if ! command -v docker &> /dev/null; then
+                echo "ERROR: Docker is not installed on the server"
+                exit 1
+              fi
+              
+              echo "✓ Docker is installed"
+              
+              # Login to Docker Hub on server
+              echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+              
+              # Pull the latest image with retry
+              PULL_SUCCESS=false
+              for i in {1..3}; do
+                echo "Pull attempt $i..."
+                if docker pull ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest; then
+                  PULL_SUCCESS=true
+                  break
+                fi
+                sleep 5
+              done
+              
+              if [ "$PULL_SUCCESS" = false ]; then
+                echo "ERROR: Failed to pull Docker image"
+                exit 1
+              fi
+              
+              echo "✓ Successfully pulled Docker image"
+              
+              # Stop and remove existing container if it exists
+              if docker ps -a | grep -q todo-react-app; then
+                echo "Stopping existing container..."
+                docker stop todo-react-app || true
+                docker rm todo-react-app || true
+                echo "✓ Removed existing container"
+              fi
+              
+              # Run the new container
+              echo "Starting new container..."
+              docker run -d \
+                --name todo-react-app \
+                --restart unless-stopped \
+                -p ${{ secrets.APP_PORT || 80 }}:80 \
+                ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest
+              
+              # Wait for container to start
+              sleep 3
+              
+              # Verify container is running
+              if docker ps | grep -q todo-react-app; then
+                echo "✓ Container is running successfully"
+                
+                # Health check
+                CONTAINER_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' todo-react-app)
+                echo "Container IP: $CONTAINER_IP"
+                
+                # Test if application is responding
+                if docker exec todo-react-app ls /usr/share/nginx/html/index.html > /dev/null 2>&1; then
+                  echo "✓ Application files are present"
+                else
+                  echo "WARNING: Application files not found"
+                fi
+                
+                docker logout
+                echo "========================================="
+                echo "✓ DEPLOYMENT SUCCESSFUL"
+                echo "========================================="
+                exit 0
+              else
+                echo "ERROR: Container failed to start"
+                docker logs todo-react-app || true
+                exit 1
+              fi
+          ENDSSH
+            then
+              echo "✓ Successfully deployed to local server!"
+              DEPLOY_SUCCESS=true
+              break
+            else
+              echo "✗ Deploy failed on attempt $ATTEMPT"
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$DEPLOY_SUCCESS" = false ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          
+          if [ "$DEPLOY_SUCCESS" = false ]; then
+            echo "✗ Failed to deploy after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+      
+      - name: Verify deployment
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+            echo "========================================="
+            echo "DEPLOYMENT VERIFICATION"
+            echo "========================================="
+            echo "Running containers:"
+            docker ps --filter "name=todo-react-app" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            echo ""
+            echo "Container logs (last 10 lines):"
+            docker logs --tail 10 todo-react-app
+            echo "========================================="
+          ENDSSH
+      
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_rsa
+
+  rollback:
+    runs-on: ubuntu-latest
+    needs: [deploy_to_local_server]
+    if: failure() && github.event_name != 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      
+      - name: Checkout previous commit
+        run: |
+          PREV_COMMIT=$(git rev-parse HEAD~1)
+          echo "Rolling back to commit: $PREV_COMMIT"
+          git checkout $PREV_COMMIT
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build React application (Rollback)
+        run: npm run build
+      
+      - name: Verify rollback build artifacts
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "ERROR: Rollback build failed - dist folder not found"
+            exit 1
+          fi
+          echo "Rollback build verification successful"
+      
+      - name: Run unit tests (Rollback)
+        run: npm test
+        timeout-minutes: 5
+      
+      - name: Run ESLint (Rollback)
+        run: npm run lint
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Get short SHA and timestamp for previous commit
+        id: rollback_vars
+        run: |
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+      
+      - name: Build Docker image (Rollback)
+        run: |
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest .
+          docker tag ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.rollback_vars.outputs.short_sha }}
+          docker tag ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest ${{ secrets.DOCKER_USERNAME }}/todo-react-app:rollback-${{ steps.rollback_vars.outputs.timestamp }}
+          
+          echo "Rollback Docker image built successfully"
+      
+      - name: Validate Docker image (Rollback)
+        run: |
+          docker run --rm -d --name test-container-rollback ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest
+          sleep 2
+          
+          if docker ps | grep -q test-container-rollback; then
+            echo "✓ Rollback container started successfully"
+            docker stop test-container-rollback
+          else
+            echo "ERROR: Rollback container failed to start"
+            exit 1
+          fi
+      
+      - name: Push rollback image with retry
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          RETRY_DELAY=15
+          PUSH_SUCCESS=false
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "========================================="
+            echo "Push Attempt $ATTEMPT of $MAX_ATTEMPTS"
+            echo "========================================="
+            
+            if docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest && \
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:${{ steps.rollback_vars.outputs.short_sha }} && \
+               docker push ${{ secrets.DOCKER_USERNAME }}/todo-react-app:rollback-${{ steps.rollback_vars.outputs.timestamp }}; then
+              echo "✓ Successfully pushed rollback images to Docker Hub!"
+              PUSH_SUCCESS=true
+              break
+            else
+              echo "✗ Push failed on attempt $ATTEMPT"
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$PUSH_SUCCESS" = false ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          
+          if [ "$PUSH_SUCCESS" = false ]; then
+            echo "✗ Failed to push after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+      
+      - name: Setup SSH key for rollback
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
+      
+      - name: Deploy rollback to Local Server
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+            set -e
+            
+            echo "========================================="
+            echo "ROLLING BACK TO PREVIOUS VERSION"
+            echo "========================================="
+            
+            # Login to Docker Hub
+            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+            
+            # Pull rollback image
+            docker pull ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest
+            
+            # Stop current container
+            docker stop todo-react-app || true
+            docker rm todo-react-app || true
+            
+            # Start rollback container
+            docker run -d \
+              --name todo-react-app \
+              --restart unless-stopped \
+              -p ${{ secrets.APP_PORT || 80 }}:80 \
+              ${{ secrets.DOCKER_USERNAME }}/todo-react-app:latest
+            
+            sleep 3
+            
+            if docker ps | grep -q todo-react-app; then
+              echo "✓ Rollback deployment successful"
+            else
+              echo "ERROR: Rollback deployment failed"
+              exit 1
+            fi
+            
+            docker logout
+          ENDSSH
+      
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_rsa
+      
+      - name: Logout from Docker Hub
+        if: always()
+        run: docker logout
+      
+      - name: Notify rollback completed
+        run: |
+          echo "========================================="
+          echo "ROLLBACK COMPLETED"
+          echo "========================================="
+          echo "Pipeline failed, rolled back to previous commit"
+          echo "Previous commit: $(git rev-parse HEAD)"
+          echo "Rollback image deployed to local server"
+
+  notify_failure:
+    runs-on: ubuntu-latest
+    needs: [build, test, deploy, deploy_to_local_server, rollback]
+    if: always() && (needs.build.result == 'failure' || needs.test.result == 'failure' || needs.deploy.result == 'failure' || needs.deploy_to_local_server.result == 'failure')
+    
+    steps:
+      - name: Pipeline Failed Notification
+        run: |
+          echo "========================================="
+          echo "PIPELINE EXECUTION FAILED"
+          echo "========================================="
+          echo "Failed Job: Check the workflow run for details"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Actor: ${{ github.actor }}"
