@@ -136,6 +136,10 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/github_actions_deploy
           chmod 600 ~/.ssh/github_actions_deploy
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Verify SSH key
+        run: |
+          ssh-keygen -lf ~/.ssh/github_actions_deploy
       
       - name: Test SSH Connection
         run: |
