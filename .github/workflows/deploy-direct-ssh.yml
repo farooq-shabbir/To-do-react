@@ -94,16 +94,19 @@ jobs:
       
       - name: Build Docker image
         run: |
+          # Verify Dockerfile exists
           if [ ! -f "Dockerfile" ]; then
             echo "ERROR: Dockerfile not found"
             exit 1
           fi
           
+          # Verify dist folder exists
           if [ ! -d "dist" ]; then
             echo "ERROR: dist folder not found - build artifacts missing"
             exit 1
           fi
           
+          # Build image with specific tag
           docker build -t todo-react-app:${{ steps.vars.outputs.short_sha }} .
           docker tag todo-react-app:${{ steps.vars.outputs.short_sha }} todo-react-app:latest
           
@@ -112,9 +115,11 @@ jobs:
       
       - name: Validate Docker image
         run: |
+          # Test if image can be run
           docker run --rm -d --name test-container todo-react-app:latest
           sleep 2
           
+          # Check if container is running
           if docker ps | grep -q test-container; then
             echo "✓ Container started successfully"
             docker stop test-container
@@ -133,17 +138,13 @@ jobs:
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/github_actions_deploy
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/github_actions_deploy
           chmod 600 ~/.ssh/github_actions_deploy
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Verify SSH key
-        run: |
-          ssh-keygen -lf ~/.ssh/github_actions_deploy
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
       
       - name: Test SSH Connection
         run: |
-          ssh -v -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✓ SSH connection successful'"
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✓ SSH connection successful'"
       
       - name: Transfer Docker image to server with retry
         run: |
@@ -157,7 +158,7 @@ jobs:
             echo "Transfer Attempt $ATTEMPT of $MAX_ATTEMPTS"
             echo "========================================="
             
-            if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/github_actions_deploy \
+            if scp -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy \
                    -o CompressionLevel=9 \
                    todo-react-app.tar.gz \
                    ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/todo-react-app.tar.gz; then
@@ -193,9 +194,10 @@ jobs:
             echo "Deploy Attempt $ATTEMPT of $MAX_ATTEMPTS"
             echo "========================================="
             
-            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+            if ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
               set -e
               
+              # Check if Docker is installed
               if ! command -v docker &> /dev/null; then
                 echo "ERROR: Docker is not installed on the server"
                 exit 1
@@ -203,6 +205,7 @@ jobs:
               
               echo "✓ Docker is installed"
               
+              # Load Docker image from tar file
               echo "Loading Docker image..."
               if docker load < /tmp/todo-react-app.tar.gz; then
                 echo "✓ Docker image loaded successfully"
@@ -211,9 +214,11 @@ jobs:
                 exit 1
               fi
               
+              # Clean up tar file
               rm -f /tmp/todo-react-app.tar.gz
               echo "✓ Cleaned up tar file"
               
+              # Stop and remove existing container if it exists
               if docker ps -a | grep -q todo-react-app; then
                 echo "Stopping existing container..."
                 docker stop todo-react-app || true
@@ -221,23 +226,30 @@ jobs:
                 echo "✓ Removed existing container"
               fi
               
+              # Remove old images to save space (keep latest)
               echo "Cleaning up old images..."
               docker image prune -f
               
+              # Run the new container
               echo "Starting new container..."
               docker run -d \
                 --name todo-react-app \
                 --restart unless-stopped \
-                -p 80:80 \
+                -p ${{ secrets.APP_PORT || 80 }}:80 \
                 todo-react-app:latest
               
+              # Wait for container to start
               sleep 3
               
+              # Verify container is running
               if docker ps | grep -q todo-react-app; then
                 echo "✓ Container is running successfully"
+                
+                # Health check
                 CONTAINER_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' todo-react-app)
                 echo "Container IP: $CONTAINER_IP"
                 
+                # Test if application is responding
                 if docker exec todo-react-app ls /usr/share/nginx/html/index.html > /dev/null 2>&1; then
                   echo "✓ Application files are present"
                 else
@@ -277,7 +289,7 @@ jobs:
       
       - name: Verify deployment
         run: |
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
             echo "========================================="
             echo "DEPLOYMENT VERIFICATION"
             echo "========================================="
@@ -378,36 +390,39 @@ jobs:
       - name: Setup SSH key for rollback
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/github_actions_deploy
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/github_actions_deploy
           chmod 600 ~/.ssh/github_actions_deploy
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
       
       - name: Transfer rollback image to server
         run: |
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/github_actions_deploy \
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy \
               -o CompressionLevel=9 \
               todo-react-app-rollback.tar.gz \
               ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/todo-react-app.tar.gz
       
       - name: Deploy rollback to Local Server
         run: |
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
             set -e
             
             echo "========================================="
             echo "ROLLING BACK TO PREVIOUS VERSION"
             echo "========================================="
             
+            # Load rollback image
             docker load < /tmp/todo-react-app.tar.gz
             rm -f /tmp/todo-react-app.tar.gz
             
+            # Stop current container
             docker stop todo-react-app || true
             docker rm todo-react-app || true
             
+            # Start rollback container
             docker run -d \
               --name todo-react-app \
               --restart unless-stopped \
-              -p 80:80 \
+              -p ${{ secrets.APP_PORT || 80 }}:80 \
               todo-react-app:latest
             
             sleep 3
