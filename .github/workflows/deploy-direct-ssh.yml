@@ -168,8 +168,7 @@ jobs:
             echo "Transfer Attempt $ATTEMPT of $MAX_ATTEMPTS"
             echo "========================================="
             
-            if scp -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy \
-                   -o CompressionLevel=9 \
+            if scp -C -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy \
                    todo-react-app.tar.gz \
                    ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/todo-react-app.tar.gz; then
               echo "✓ Successfully transferred Docker image!"
@@ -406,8 +405,7 @@ jobs:
       
       - name: Transfer rollback image to server
         run: |
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy \
-              -o CompressionLevel=9 \
+          scp -C -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy \
               todo-react-app-rollback.tar.gz \
               ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/todo-react-app.tar.gz
       
