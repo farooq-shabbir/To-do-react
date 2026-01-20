@@ -141,10 +141,20 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/github_actions_deploy
           chmod 600 ~/.ssh/github_actions_deploy
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
+          
+          # Debug: Check key file
+          echo "Key file size: $(wc -c < ~/.ssh/github_actions_deploy) bytes"
+          echo "Key file lines: $(wc -l < ~/.ssh/github_actions_deploy)"
+          echo "First line: $(head -n1 ~/.ssh/github_actions_deploy)"
+          echo "Last line: $(tail -n1 ~/.ssh/github_actions_deploy)"
+          
+          # Verify key format
+          ssh-keygen -l -f ~/.ssh/github_actions_deploy || echo "Key validation failed"
       
       - name: Test SSH Connection
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✓ SSH connection successful'"
+          echo "Testing connection to ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
+          ssh -vvv -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✓ SSH connection successful'" 2>&1 | tail -30
       
       - name: Transfer Docker image to server with retry
         run: |
