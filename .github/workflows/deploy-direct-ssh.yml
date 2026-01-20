@@ -138,13 +138,13 @@ jobs:
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/github_actions_deploy
+          chmod 600 ~/.ssh/github_actions_deploy
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
       
       - name: Test SSH Connection
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✓ SSH connection successful'"
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✓ SSH connection successful'"
       
       - name: Transfer Docker image to server with retry
         run: |
@@ -158,7 +158,7 @@ jobs:
             echo "Transfer Attempt $ATTEMPT of $MAX_ATTEMPTS"
             echo "========================================="
             
-            if scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa \
+            if scp -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy \
                    -o CompressionLevel=9 \
                    todo-react-app.tar.gz \
                    ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/todo-react-app.tar.gz; then
@@ -194,7 +194,7 @@ jobs:
             echo "Deploy Attempt $ATTEMPT of $MAX_ATTEMPTS"
             echo "========================================="
             
-            if ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+            if ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
               set -e
               
               # Check if Docker is installed
@@ -289,7 +289,7 @@ jobs:
       
       - name: Verify deployment
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
             echo "========================================="
             echo "DEPLOYMENT VERIFICATION"
             echo "========================================="
@@ -306,7 +306,7 @@ jobs:
       
       - name: Cleanup SSH key
         if: always()
-        run: rm -f ~/.ssh/id_rsa
+        run: rm -f ~/.ssh/github_actions_deploy
 
   rollback:
     runs-on: ubuntu-latest
@@ -390,20 +390,20 @@ jobs:
       - name: Setup SSH key for rollback
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/github_actions_deploy
+          chmod 600 ~/.ssh/github_actions_deploy
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts || true
       
       - name: Transfer rollback image to server
         run: |
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa \
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy \
               -o CompressionLevel=9 \
               todo-react-app-rollback.tar.gz \
               ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/todo-react-app.tar.gz
       
       - name: Deploy rollback to Local Server
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/github_actions_deploy ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ENDSSH'
             set -e
             
             echo "========================================="
@@ -437,7 +437,7 @@ jobs:
       
       - name: Cleanup SSH key
         if: always()
-        run: rm -f ~/.ssh/id_rsa
+        run: rm -f ~/.ssh/github_actions_deploy
       
       - name: Notify rollback completed
         run: |
