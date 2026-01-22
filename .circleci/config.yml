@@ -1,0 +1,326 @@
+notify_failure:
+    docker:
+      - image: cimg/base:2023.09
+    steps:
+      - run:
+          name: Pipeline Failed
+          command: |
+            echo "Pipeline execution failed. Check CircleCI dashboard for details."
+            echo "Failed Job: ${CIRCLE_JOB}"
+            echo "Commit: ${CIRCLE_SHA1}"
+
+version: 2.1
+
+orbs:
+  docker: circleci/docker@2.2.0
+
+jobs:
+  build:
+    docker:
+      - image: cimg/node:18.17.0
+    working_directory: ~/to-do-react
+    steps:
+      - checkout
+
+      # Restore cache for node_modules
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "package-lock.json" }}
+            - v1-dependencies-
+
+      # Install dependencies
+      - run:
+          name: Install dependencies
+          command: npm install
+
+      # Save cache for node_modules
+      - save_cache:
+          key: v1-dependencies-{{ checksum "package-lock.json" }}
+          paths:
+            - node_modules
+          when: always
+
+      # Build the React app with Vite
+      - run:
+          name: Build React application
+          command: npm run build
+
+      # Verify build output exists
+      - run:
+          name: Verify build artifacts
+          command: |
+            if [ ! -d "dist" ]; then
+              echo "ERROR: Build failed - dist folder not found"
+              exit 1
+            fi
+            echo "Build verification successful"
+
+      # Store build artifacts
+      - persist_to_workspace:
+          root: ~/to-do-react
+          paths:
+            - dist
+            - Dockerfile
+            - nginx.conf
+            - package.json
+            - package-lock.json
+            - index.html
+            - vite.config.js
+            - src
+
+  test:
+    docker:
+      - image: cimg/node:18.17.0
+    working_directory: ~/to-do-react
+    steps:
+      - checkout
+
+      # Restore cached dependencies
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "package-lock.json" }}
+            - v1-dependencies-
+
+      # Install dependencies
+      - run:
+          name: Install dependencies
+          command: npm install
+
+      # Run tests with timeout
+      - run:
+          name: Run unit tests
+          command: npm test
+          timeout: 5m
+
+      # Run ESLint (STRICT - fails on warnings)
+      - run:
+          name: Run ESLint code quality checks
+          command: npm run lint
+
+      # Store test results
+      - store_test_results:
+          path: coverage
+
+      # Store coverage artifacts (limit retention)
+      - store_artifacts:
+          path: coverage
+          destination: coverage
+          retention-days: 3
+
+  rollback_build_test:
+    docker:
+      - image: cimg/node:18.17.0
+    working_directory: ~/to-do-react
+    steps:
+      - checkout
+
+      # Get and checkout previous commit
+      - run:
+          name: Checkout previous commit
+          command: |
+            PREV_COMMIT=$(git rev-parse HEAD~1)
+            echo "Rolling back to commit: $PREV_COMMIT"
+            git checkout $PREV_COMMIT
+
+      # Restore cache
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "package-lock.json" }}
+            - v1-dependencies-
+
+      # Install dependencies
+      - run:
+          name: Install dependencies
+          command: npm install
+
+      # Save cache
+      - save_cache:
+          key: v1-dependencies-{{ checksum "package-lock.json" }}
+          paths:
+            - node_modules
+          when: always
+
+      # Build
+      - run:
+          name: Build React application (Rollback)
+          command: npm run build
+
+      # Verify build output
+      - run:
+          name: Verify rollback build artifacts
+          command: |
+            if [ ! -d "dist" ]; then
+              echo "ERROR: Rollback build failed - dist folder not found"
+              exit 1
+            fi
+            echo "Rollback build verification successful"
+
+      # Test
+      - run:
+          name: Run unit tests (Rollback)
+          command: npm test
+          timeout: 5m
+
+      # Lint
+      - run:
+          name: Run ESLint (Rollback)
+          command: npm run lint
+
+      # If successful, persist to workspace
+      - persist_to_workspace:
+          root: ~/to-do-react
+          paths:
+            - dist
+            - Dockerfile
+            - package.json
+            - package-lock.json
+
+  deploy_to_dockerhub:
+    docker:
+      - image: cimg/base:2023.09
+    steps:
+      - setup_remote_docker:
+          version: 20.10.24
+
+      # Attach workspace from previous job
+      - attach_workspace:
+          at: ~/to-do-react
+
+      # Login to Docker Hub
+      - run:
+          name: Login to Docker Hub
+          command: |
+            if [ -z "$DOCKERHUB_USER" ] || [ -z "$DOCKERHUB_PASS" ]; then
+              echo "ERROR: Docker Hub credentials not set"
+              exit 1
+            fi
+            echo $DOCKERHUB_PASS | docker login -u $DOCKERHUB_USER --password-stdin
+
+      # Build Docker image with build validation
+      - run:
+          name: Build Docker image
+          command: |
+            cd ~/to-do-react
+            
+            # Verify Dockerfile exists
+            if [ ! -f "Dockerfile" ]; then
+              echo "ERROR: Dockerfile not found"
+              exit 1
+            fi
+            
+            # Verify dist folder exists
+            if [ ! -d "dist" ]; then
+              echo "ERROR: dist folder not found - build artifacts missing"
+              exit 1
+            fi
+            
+            # Clean any untracked files to prevent issues
+            ls -la
+            
+            # Get short commit hash from CircleCI env var
+            SHORT_SHA=$(echo $CIRCLE_SHA1 | cut -c1-7)
+            
+            # Build image
+            docker build -t $DOCKERHUB_USER/to-do-react:latest .
+            docker tag $DOCKERHUB_USER/to-do-react:latest $DOCKERHUB_USER/to-do-react:$SHORT_SHA
+            docker tag $DOCKERHUB_USER/to-do-react:latest $DOCKERHUB_USER/to-do-react:v1.0.$(date +%Y%m%d)
+            
+            echo "Docker image built successfully"
+            echo "Tags: latest, $SHORT_SHA, v1.0.$(date +%Y%m%d)"
+
+      # Validate Docker image
+      - run:
+          name: Validate Docker image
+          command: |
+            # Test if image can be run (just verify it starts)
+            docker run --rm -d --name test-container $DOCKERHUB_USER/to-do-react:latest
+            sleep 2
+            
+            # Check if container is running
+            if docker ps | grep -q test-container; then
+              echo "✓ Container started successfully"
+              docker stop test-container
+            else
+              echo "ERROR: Container failed to start"
+              exit 1
+            fi
+
+      # Push with smart retry logic
+      - run:
+          name: Push Docker image with smart retry
+          command: |
+            MAX_ATTEMPTS=3
+            ATTEMPT=1
+            RETRY_DELAY=15
+            PUSH_SUCCESS=false
+            
+            # Get short commit hash from CircleCI env var
+            SHORT_SHA=$(echo $CIRCLE_SHA1 | cut -c1-7)
+            
+            while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+              echo "========================================="
+              echo "Push Attempt $ATTEMPT of $MAX_ATTEMPTS"
+              echo "========================================="
+              
+              # Attempt push directly
+              if docker push $DOCKERHUB_USER/to-do-react:latest && \
+                 docker push $DOCKERHUB_USER/to-do-react:$SHORT_SHA && \
+                 docker push $DOCKERHUB_USER/to-do-react:v1.0.$(date +%Y%m%d); then
+                echo "✓ Successfully pushed all tags to Docker Hub!"
+                PUSH_SUCCESS=true
+                break
+              else
+                echo "✗ Push failed on attempt $ATTEMPT"
+              fi
+              
+              ATTEMPT=$((ATTEMPT + 1))
+              
+              # If not the last attempt, wait before retry
+              if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$PUSH_SUCCESS" = false ]; then
+                echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+                sleep $RETRY_DELAY
+              fi
+            done
+            
+            if [ "$PUSH_SUCCESS" = false ]; then
+              echo "✗ Failed to push after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+
+      # Logout from Docker Hub
+      - run:
+          name: Logout from Docker Hub
+          command: docker logout
+          when: always
+
+  notify_failure:
+    docker:
+      - image: cimg/base:2023.09
+    steps:
+      - run:
+          name: Pipeline Failed
+          command: |
+            echo "Pipeline execution failed. Check CircleCI dashboard for details."
+            echo "Failed Job: ${CIRCLE_JOB}"
+            echo "Commit: ${CIRCLE_SHA1}"
+
+workflows:
+  build_test_deploy:
+    jobs:
+      # Step 1: Build
+      - build:
+          name: Build Application
+
+      # Step 2: Test (depends on build)
+      - test:
+          name: Run Tests
+          requires:
+            - Build Application
+
+      # Step 3: If tests pass, proceed to deploy
+      - deploy_to_dockerhub:
+          name: Deploy to Docker Hub
+          requires:
+            - Run Tests
+          context:
+            - docker-hub-credentials

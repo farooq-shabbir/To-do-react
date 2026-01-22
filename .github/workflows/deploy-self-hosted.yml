@@ -1,0 +1,283 @@
+name: Build and Deploy with Self-Hosted Runner
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-test-deploy:
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build React application
+        run: npm run build
+      
+      - name: Verify build artifacts
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "ERROR: Build failed - dist folder not found"
+            exit 1
+          fi
+          echo "✓ Build verification successful"
+      
+      - name: Run unit tests
+        run: npm test
+        timeout-minutes: 5
+      
+      - name: Run ESLint code quality checks
+        run: npm run lint
+      
+      - name: Get short SHA
+        id: vars
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+      
+      - name: Build Docker image
+        run: |
+          echo "Building Docker image..."
+          docker build -t todo-react-app:${{ steps.vars.outputs.short_sha }} .
+          docker tag todo-react-app:${{ steps.vars.outputs.short_sha }} todo-react-app:latest
+          echo "✓ Docker image built: todo-react-app:latest"
+      
+      - name: Validate Docker image
+        run: |
+          echo "Testing Docker image..."
+          docker run --rm -d --name test-container todo-react-app:latest
+          sleep 2
+          
+          if docker ps | grep -q test-container; then
+            echo "✓ Container started successfully"
+            docker stop test-container
+          else
+            echo "ERROR: Container failed to start"
+            docker logs test-container || true
+            exit 1
+          fi
+      
+      - name: Backup current container (if exists)
+        run: |
+          if docker ps -a | grep -q todo-react-app; then
+            echo "Creating backup of current deployment..."
+            docker commit todo-react-app todo-react-app:backup-$(date +%Y%m%d-%H%M%S)
+            echo "✓ Backup created"
+          else
+            echo "No existing container to backup"
+          fi
+      
+      - name: Deploy container with retry
+        id: deploy
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          DEPLOY_SUCCESS=false
+          PORT=${{ secrets.APP_PORT || 80 }}
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "========================================="
+            echo "Deploy Attempt $ATTEMPT of $MAX_ATTEMPTS"
+            echo "========================================="
+            
+            # Step 1: Stop and remove ALL containers with this name (including stopped/failed ones)
+            echo "Step 1: Cleaning up existing containers..."
+            docker ps -aq --filter "name=todo-react-app" | xargs -r docker stop 2>/dev/null || true
+            docker ps -aq --filter "name=todo-react-app" | xargs -r docker rm -f 2>/dev/null || true
+            
+            # Step 2: Find and stop ANY container using the target port
+            echo "Step 2: Finding containers using port $PORT..."
+            CONFLICTING_CONTAINERS=$(docker ps --format '{{.ID}} {{.Ports}}' | grep "0.0.0.0:$PORT" | awk '{print $1}')
+            if [ -n "$CONFLICTING_CONTAINERS" ]; then
+              echo "Found conflicting containers: $CONFLICTING_CONTAINERS"
+              echo "$CONFLICTING_CONTAINERS" | xargs -r docker stop 2>/dev/null || true
+              echo "$CONFLICTING_CONTAINERS" | xargs -r docker rm -f 2>/dev/null || true
+            fi
+            
+            # Step 3: Wait for Docker to release the port
+            sleep 3
+            
+            # Step 4: Check if port is available and kill any process using it
+            echo "Step 3: Checking if port $PORT is free..."
+            if sudo lsof -ti:$PORT > /dev/null 2>&1; then
+              echo "⚠ Port $PORT is in use by process(es):"
+              sudo lsof -i:$PORT
+              echo "Killing process(es)..."
+              sudo lsof -ti:$PORT | xargs -r sudo kill -9 2>/dev/null || true
+              sleep 2
+            elif sudo fuser $PORT/tcp > /dev/null 2>&1; then
+              echo "⚠ Port $PORT is in use (fuser detection), killing..."
+              sudo fuser -k $PORT/tcp 2>/dev/null || true
+              sleep 2
+            else
+              echo "✓ Port $PORT is free"
+            fi
+            
+            # Step 5: Start new container
+            echo "Step 4: Starting new container on port $PORT..."
+            if docker run -d \
+              --name todo-react-app \
+              --restart unless-stopped \
+              -p $PORT:80 \
+              todo-react-app:latest; then
+              
+              # Wait for container to be ready
+              sleep 3
+              
+              # Verify container is running
+              if docker ps | grep -q todo-react-app; then
+                echo "========================================="
+                echo "✓ Container deployed successfully"
+                echo "========================================="
+                DEPLOY_SUCCESS=true
+                break
+              else
+                echo "✗ Container stopped unexpectedly"
+                docker logs todo-react-app || true
+              fi
+            else
+              echo "✗ Failed to start container on attempt $ATTEMPT"
+              echo "Checking for errors..."
+              docker logs todo-react-app 2>/dev/null || true
+              
+              # Show what's using the port for debugging
+              echo "Processes on port $PORT:"
+              sudo lsof -i:$PORT 2>/dev/null || echo "No processes found with lsof"
+              sudo fuser $PORT/tcp 2>/dev/null || echo "No processes found with fuser"
+              docker ps --format '{{.ID}} {{.Ports}}' | grep ":$PORT" || echo "No Docker containers on this port"
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            if [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$DEPLOY_SUCCESS" = false ]; then
+              echo "⏳ Waiting 5s before retry..."
+              sleep 5
+            fi
+          done
+          
+          if [ "$DEPLOY_SUCCESS" = false ]; then
+            echo "✗ Deployment failed after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+      
+      - name: Health check
+        run: |
+          echo "Running health checks..."
+          
+          # Check container status
+          docker ps --filter "name=todo-react-app" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          
+          # Test HTTP endpoint
+          PORT=${{ secrets.APP_PORT || 80 }}
+          for i in {1..10}; do
+            if curl -f http://localhost:$PORT > /dev/null 2>&1; then
+              echo "✓ Application is responding on port $PORT"
+              break
+            fi
+            if [ $i -eq 10 ]; then
+              echo "WARNING: Application not responding"
+              docker logs --tail 20 todo-react-app
+            fi
+            sleep 2
+          done
+      
+      - name: Verify deployment
+        run: |
+          echo "========================================="
+          echo "DEPLOYMENT VERIFICATION"
+          echo "========================================="
+          echo "Container Status:"
+          docker ps --filter "name=todo-react-app"
+          echo ""
+          echo "Recent Logs:"
+          docker logs --tail 10 todo-react-app
+          echo ""
+          echo "Disk Usage:"
+          docker system df
+          echo "========================================="
+      
+      - name: Cleanup old images
+        if: success()
+        run: |
+          echo "Cleaning up old images (keeping latest and backups)..."
+          docker image prune -f
+          echo "✓ Cleanup complete"
+      
+      - name: Rollback on failure
+        if: failure() && steps.deploy.outcome == 'failure'
+        run: |
+          echo "========================================="
+          echo "DEPLOYMENT FAILED - INITIATING ROLLBACK"
+          echo "========================================="
+          
+          # Find most recent backup
+          BACKUP_IMAGE=$(docker images --filter "reference=todo-react-app:backup-*" --format "{{.Repository}}:{{.Tag}}" | head -n 1)
+          
+          if [ -n "$BACKUP_IMAGE" ]; then
+            echo "Rolling back to: $BACKUP_IMAGE"
+            
+            # Stop failed container
+            docker stop todo-react-app 2>/dev/null || true
+            docker rm todo-react-app 2>/dev/null || true
+            
+            # Start backup container
+            docker run -d \
+              --name todo-react-app \
+              --restart unless-stopped \
+              -p ${{ secrets.APP_PORT || 80 }}:80 \
+              $BACKUP_IMAGE
+            
+            sleep 3
+            
+            if docker ps | grep -q todo-react-app; then
+              echo "✓ Rollback successful"
+            else
+              echo "✗ Rollback failed"
+              exit 1
+            fi
+          else
+            echo "No backup available for rollback"
+            exit 1
+          fi
+      
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "========================================="
+          echo "DEPLOYMENT SUMMARY"
+          echo "========================================="
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Workflow: ${{ github.workflow }}"
+          if docker ps | grep -q todo-react-app; then
+            echo "Status: ✓ RUNNING"
+          else
+            echo "Status: ✗ FAILED"
+          fi
+          echo "========================================="
+
+  cleanup:
+    runs-on: self-hosted
+    needs: [build-test-deploy]
+    if: success()
+    
+    steps:
+      - name: Remove old backups (keep last 3)
+        run: |
+          echo "Removing old backup images (keeping last 3)..."
+          docker images --filter "reference=todo-react-app:backup-*" --format "{{.Repository}}:{{.Tag}}" | tail -n +4 | xargs -r docker rmi
+          echo "✓ Old backups cleaned up"
