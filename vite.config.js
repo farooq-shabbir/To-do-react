@@ -5,6 +5,7 @@ import path from 'path';
 export default defineConfig({
   plugins: [react()],
   root: '.',
+  base: '/To-do-react/',
   server: {
     port: 3000,
     host: true,
